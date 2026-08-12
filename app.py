@@ -92,32 +92,52 @@ def create_initial_groups(reg_df, reg_col):
     remaining_students = cs_students + other_students
     random.shuffle(remaining_students)
 
-    teams = []
-    bce_idx = other_cs_idx = other_idx = remain_idx = 0
     assigned_students = set()
 
-    for team_num in range(1, expected_teams + 1):
-        team_members = []
-        cs_count = 0
-        other_count = 0
+    # Reserve CS-group (BACSE191) members per team in three cross-team passes so
+    # the 2-per-team minimum is spread fairly instead of front-loading early teams to 3
+    # while later teams get none: (1) 1 BCE each, (2) 1 more (any CS code) to reach 2,
+    # (3) whatever's left in other_cs_students to top up to 3.
+    team_cs_members = [[] for _ in range(expected_teams)]
 
-        # Reserve at least 1 BCE student for this team
-        while cs_count < 1 and bce_idx < len(bce_students):
-            if bce_students[bce_idx] not in assigned_students:
-                student = bce_students[bce_idx]
-                team_members.append((student, get_course_code(student)))
-                assigned_students.add(student)
-                cs_count += 1
+    bce_idx = 0
+    for t in range(expected_teams):
+        while bce_idx < len(bce_students):
+            student = bce_students[bce_idx]
             bce_idx += 1
-
-        # Fill remaining CS group quota (up to 3) from other CS codes
-        while cs_count < 3 and other_cs_idx < len(other_cs_students):
-            if other_cs_students[other_cs_idx] not in assigned_students:
-                student = other_cs_students[other_cs_idx]
-                team_members.append((student, get_course_code(student)))
+            if student not in assigned_students:
+                team_cs_members[t].append(student)
                 assigned_students.add(student)
-                cs_count += 1
+                break
+
+    other_cs_idx = 0
+    for t in range(expected_teams):
+        if len(team_cs_members[t]) >= 2:
+            continue
+        while other_cs_idx < len(other_cs_students):
+            student = other_cs_students[other_cs_idx]
             other_cs_idx += 1
+            if student not in assigned_students:
+                team_cs_members[t].append(student)
+                assigned_students.add(student)
+                break
+
+    for t in range(expected_teams):
+        while len(team_cs_members[t]) < 3 and other_cs_idx < len(other_cs_students):
+            student = other_cs_students[other_cs_idx]
+            other_cs_idx += 1
+            if student not in assigned_students:
+                team_cs_members[t].append(student)
+                assigned_students.add(student)
+
+    teams = []
+    other_idx = remain_idx = 0
+
+    for team_num in range(1, expected_teams + 1):
+        team_members = [
+            (student, get_course_code(student)) for student in team_cs_members[team_num - 1]
+        ]
+        other_count = 0
 
         # Add 2 others
         while other_count < 2 and other_idx < len(other_students):
@@ -210,31 +230,55 @@ def update_groups(new_reg_df, existing_groups_df, reg_col):
 
     all_students = list(new_regs)
     bce_pool = [s for s in all_students if extract_programme_code(s) == "BCE"]
-    other_pool = [s for s in all_students if extract_programme_code(s) != "BCE"]
+    other_cs_pool = [s for s in all_students if is_cs_group(s) and extract_programme_code(s) != "BCE"]
+    non_cs_pool = [s for s in all_students if not is_cs_group(s)]
     random.shuffle(bce_pool)
-    random.shuffle(other_pool)
+    random.shuffle(other_cs_pool)
+    random.shuffle(non_cs_pool)
+
+    course_cols = [f"Course_{i}" for i in range(1, 6)]
 
     def team_has_bce(row):
         return any(extract_programme_code(row[col]) == "BCE" for col in member_cols if pd.notnull(row[col]))
 
-    # First pass: give each team without a BCE member one, if a slot and a BCE student are available
+    def team_bacse_count(idx):
+        return sum(
+            1 for col in course_cols
+            if pd.notnull(updated_groups.at[idx, col]) and updated_groups.at[idx, col] == "BACSE191"
+        )
+
+    def assign_to_first_empty_slot(idx, student):
+        for i in range(1, 6):
+            member_col = f"Member_{i}"
+            course_col = f"Course_{i}"
+            if pd.isnull(updated_groups.at[idx, member_col]):
+                updated_groups.at[idx, member_col] = student
+                updated_groups.at[idx, course_col] = get_course_code(student)
+                assigned_students.add(student)
+                return True
+        return False
+
+    # Pass 1: give each team without a BCE member one, if a slot and a BCE student are available
     bce_idx = 0
     for idx, row in updated_groups.iterrows():
         if team_has_bce(row):
             continue
-        for i in range(1, 6):
-            member_col = f"Member_{i}"
-            course_col = f"Course_{i}"
-            if pd.isnull(updated_groups.at[idx, member_col]) and bce_idx < len(bce_pool):
-                student = bce_pool[bce_idx]
-                updated_groups.at[idx, member_col] = student
-                updated_groups.at[idx, course_col] = get_course_code(student)
-                assigned_students.add(student)
+        if bce_idx < len(bce_pool):
+            if assign_to_first_empty_slot(idx, bce_pool[bce_idx]):
                 bce_idx += 1
-                break
 
-    # Second pass: fill remaining empty slots from whatever's left, order shuffled
-    remaining_students = bce_pool[bce_idx:] + other_pool
+    # Pass 2: top up every team to at least 2 BACSE191 members, spread fairly before any
+    # team gets a 3rd, using leftover BACSE191-mapped students of any CS code
+    other_cs_idx = 0
+    for idx, row in updated_groups.iterrows():
+        if team_bacse_count(idx) >= 2:
+            continue
+        if other_cs_idx < len(other_cs_pool):
+            if assign_to_first_empty_slot(idx, other_cs_pool[other_cs_idx]):
+                other_cs_idx += 1
+
+    # Pass 3: fill remaining empty slots from whatever's left, order shuffled
+    remaining_students = bce_pool[bce_idx:] + other_cs_pool[other_cs_idx:] + non_cs_pool
     random.shuffle(remaining_students)
     student_idx = 0
     for idx, row in updated_groups.iterrows():
