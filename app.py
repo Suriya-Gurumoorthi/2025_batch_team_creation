@@ -10,6 +10,7 @@ programme_to_course = {
     "BCL": "BACLE191",
     "BCV": "BACLE191",
     "BCM": "BACHE191",
+    "BVD": "BAECE191",
     "BCE": "BACSE191",
     "BBS": "BACSE191",
     "BAI": "BACSE191",
